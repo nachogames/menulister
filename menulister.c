@@ -4,24 +4,12 @@
 #include <signal.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdlib.h>
 
-// Constants for notifications
-#define kAXFocusedApplicationChangedNotification CFSTR("AXFocusedApplicationChanged")
-#define kAXFocusedWindowChangedNotification CFSTR("AXFocusedWindowChanged")
-
-// Global run loop reference for clean shutdown
-static CFRunLoopRef gMainRunLoop = NULL;
-
-static void cleanup(void) {
-    if (gMainRunLoop) {
-        CFRunLoopStop(gMainRunLoop);
-    }
-}
-
-static void signal_handler(int signum) {
-    printf("\nReceived signal %d, shutting down...\n", signum);
-    cleanup();
-}
+// Function declarations
+static void printMenuHierarchy(AXUIElementRef menuElement, int indent);
+static Boolean checkAccessibilityPermissions(void);
+static void listMenusForPID(pid_t pid);
 
 static void printMenuHierarchy(AXUIElementRef menuElement, int indent) {
     if (!menuElement) return;
@@ -100,24 +88,10 @@ static Boolean checkAccessibilityPermissions(void) {
     return trusted;
 }
 
-static void listMenusOfFrontmostApp(void) {
-    ProcessSerialNumber psn;
-    OSErr err = GetFrontProcess(&psn);
-    if (err != noErr) {
-        printf("[!] Could not get front process. Error: %d\n", err);
-        return;
-    }
-
-    pid_t pid;
-    err = GetProcessPID(&psn, &pid);
-    if (err != noErr) {
-        printf("[!] Could not get process PID. Error: %d\n", err);
-        return;
-    }
-
+static void listMenusForPID(pid_t pid) {
     AXUIElementRef app = AXUIElementCreateApplication(pid);
     if (!app) {
-        printf("[!] Could not create application reference.\n");
+        printf("[!] Could not create application reference for PID %d.\n", pid);
         return;
     }
 
@@ -131,39 +105,37 @@ static void listMenusOfFrontmostApp(void) {
     CFRelease(app);
 
     if (axErr != kAXErrorSuccess || !menuBar) {
-        printf("[!] Could not get menu bar. Error: %d\n", axErr);
+        printf("[!] Could not get menu bar for PID %d. Error: %d\n", pid, axErr);
         return;
     }
 
     printf("\n=======================================\n");
-    printf(" Menus for frontmost application\n");
+    printf(" Menus for application (PID: %d)\n", pid);
     printf("=======================================\n");
     printMenuHierarchy(menuBar, 0);
     CFRelease(menuBar);
 }
 
-static void observerCallback(AXObserverRef observer,
-                           AXUIElementRef element,
-                           CFStringRef notification,
-                           void *refcon) {
-    if (!element || !notification) return;
-    
-    // Log the type of focus change
-    char notifName[256];
-    if (CFStringGetCString(notification, notifName, sizeof(notifName), kCFStringEncodingUTF8)) {
-        printf("\nFocus change detected: %s\n", notifName);
-    }
-    
-    listMenusOfFrontmostApp();
+void print_usage(const char* program_name) {
+    printf("Usage: %s <pid>\n", program_name);
+    printf("  pid: Process ID of the application to show menus for\n");
+    printf("\nExample: %s 1234\n", program_name);
 }
 
 int main(int argc, const char * argv[]) {
-    // Set up signal handling for clean exit
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    if (argc != 2) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    pid_t pid = atoi(argv[1]);
+    if (pid <= 0) {
+        printf("Error: Invalid PID specified\n");
+        print_usage(argv[0]);
+        return 1;
+    }
 
     printf("Checking accessibility permissions...\n");
-    // Check accessibility permissions
     if (!checkAccessibilityPermissions()) {
         printf("[!] Accessibility permissions not granted.\n");
         printf("Please grant permissions in System Settings > Privacy & Security > Accessibility\n");
@@ -171,61 +143,6 @@ int main(int argc, const char * argv[]) {
         return 1;
     }
 
-    printf("Creating accessibility objects...\n");
-    AXUIElementRef systemWide = AXUIElementCreateSystemWide();
-    if (!systemWide) {
-        printf("[!] Failed to create system-wide accessibility object.\n");
-        return 1;
-    }
-
-    // Use current process ID instead of 0
-    pid_t pid = getpid();
-    AXObserverRef observer = NULL;
-    AXError err = AXObserverCreate(pid, observerCallback, &observer);
-    if (err != kAXErrorSuccess) {
-        printf("[!] Unable to create AXObserver. Error code: %d\n", err);
-        CFRelease(systemWide);
-        return 1;
-    }
-
-    // Add a small delay to allow the observer to initialize
-    usleep(100000); // 100ms delay
-
-    // Add notifications
-    err = AXObserverAddNotification(observer, systemWide, kAXFocusedApplicationChangedNotification, NULL);
-    if (err != kAXErrorSuccess) {
-        printf("[!] Could not add application focus notification. Error: %d\n", err);
-        printf("Please make sure accessibility permissions are granted.\n");
-    }
-
-    err = AXObserverAddNotification(observer, systemWide, kAXFocusedWindowChangedNotification, NULL);
-    if (err != kAXErrorSuccess) {
-        printf("[!] Could not add window focus notification. Error: %d\n", err);
-    }
-
-    // Store run loop reference for clean shutdown
-    gMainRunLoop = CFRunLoopGetCurrent();
-    CFRunLoopAddSource(
-        gMainRunLoop,
-        AXObserverGetRunLoopSource(observer),
-        kCFRunLoopDefaultMode
-    );
-
-    printf("\nInitializing menu listing...\n");
-    // Initial menu listing
-    listMenusOfFrontmostApp();
-
-    printf("\nMonitoring focus changes. Press Ctrl+C to exit.\n");
-    CFRunLoopRun();
-
-    // Cleanup
-    if (observer) {
-        AXObserverRemoveNotification(observer, systemWide, kAXFocusedApplicationChangedNotification);
-        AXObserverRemoveNotification(observer, systemWide, kAXFocusedWindowChangedNotification);
-        CFRelease(observer);
-    }
-    if (systemWide) CFRelease(systemWide);
-
-    printf("Shutdown complete.\n");
+    listMenusForPID(pid);
     return 0;
 }
